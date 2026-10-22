@@ -1,0 +1,13 @@
+{
+  "output_dir": "D:/musics",
+  "media_type": "audio",
+  "video_format": "mp4",
+  "video_quality": "best",
+  "audio_format": "flac",
+  "audio_quality": "best",
+  "embed_thumbnail": true,
+  "embed_metadata": true,
+  "embed_subtitles": false,
+  "max_concurrent_downloads": 1,
+  "custom_ffmpeg_path": ""
+}
