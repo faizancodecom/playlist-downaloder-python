@@ -52,7 +52,14 @@ def find_binary(binary_name="ffmpeg"):
     if path_which:
         return path_which
 
-    # 4. Check common Windows paths
+    # 4. Check WinGet Packages (Official static build)
+    winget_pkg_dir = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages"
+    if winget_pkg_dir.exists():
+        for p in winget_pkg_dir.glob(f"**/bin/{exe_name}"):
+            if p.exists():
+                return str(p)
+
+    # 5. Check common Windows paths
     candidates = [
         Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links" / exe_name,
         Path("C:/ffmpeg/bin") / exe_name,

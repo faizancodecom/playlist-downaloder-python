@@ -799,7 +799,7 @@ class MainWindow(QMainWindow):
         self._current_download_idx = idx
         self._total_download_items = total
         self.overall_progress_bar.setValue(percent)
-        eta_part = f" • Est. remaining: {batch_eta_str}" if (batch_eta_str and batch_eta_str != "--:--") else ""
+        eta_part = f" • Total Batch ETA: {batch_eta_str}" if (batch_eta_str and batch_eta_str != "--:--") else ""
         self.overall_status_lbl.setText(f"Processing item {idx} of {total} ({percent}%){eta_part}")
 
     def _on_item_download_started(self, item_id: str, idx: int, title: str):
@@ -814,7 +814,6 @@ class MainWindow(QMainWindow):
                 card.set_progress(data)
                 break
         
-        status_text = data.get("status", "")
         speed = data.get("speed_str", "")
         eta = data.get("eta_str", "")
         batch_pct = data.get("batch_percent", self.overall_progress_bar.value())
@@ -822,22 +821,22 @@ class MainWindow(QMainWindow):
 
         self.overall_progress_bar.setValue(batch_pct)
 
-        if any(w in status_text.lower() for w in ("converting", "processing", "muxing")):
-            self.overall_speed_lbl.setText("Converting & Tagging...")
-        else:
-            speed_info = []
-            if speed and speed not in ("-- KB/s", "--"):
-                speed_info.append(speed)
-            if eta and eta != "--:--":
-                speed_info.append(f"Item ETA: {eta}")
-            if speed_info:
-                self.overall_speed_lbl.setText(" | ".join(speed_info))
+        speed_info = []
+        if speed and speed not in ("-- KB/s", "--"):
+            speed_info.append(f"Net Speed: {speed}")
+        if eta and eta not in ("--:--", "00:00"):
+            speed_info.append(f"Item ETA: {eta}")
+        elif batch_eta and batch_eta != "--:--":
+            speed_info.append(f"Total ETA: {batch_eta}")
+
+        if speed_info:
+            self.overall_speed_lbl.setText(" | ".join(speed_info))
 
         if batch_eta and batch_eta != "--:--":
             idx = self._current_download_idx or 1
             tot = self._total_download_items or len(self.cards)
             self.overall_status_lbl.setText(
-                f"Processing item {idx} of {tot} ({batch_pct}%) • Est. remaining: {batch_eta}"
+                f"Processing item {idx} of {tot} ({batch_pct}%) • Total Batch ETA: {batch_eta}"
             )
 
     def _on_item_download_completed(self, item_id: str, filename: str):

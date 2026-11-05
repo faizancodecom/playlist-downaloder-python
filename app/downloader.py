@@ -201,7 +201,11 @@ class PlaylistDownloadWorker(QThread):
         self._item_start_time = 0.0
         self._item_last_time = 0.0
         self._item_last_bytes = 0
+        self._item_total_bytes = 0
         self._item_smooth_speed = 0.0
+        self._last_effective_speed = 0.0
+        self._completed_items_bytes = 0
+        self._completed_items_count = 0
 
     def cancel(self):
         self._is_cancelled = True
@@ -233,7 +237,10 @@ class PlaylistDownloadWorker(QThread):
             raw_eta = d.get('eta')
             now = time.time()
 
-            # Dynamic speed smoothing
+            if total > 0:
+                self._item_total_bytes = total
+
+            # Dynamic speed smoothing based on actual bytes transferred
             dt = now - self._item_last_time
             if dt >= 0.2:
                 db = downloaded - self._item_last_bytes
@@ -247,8 +254,12 @@ class PlaylistDownloadWorker(QThread):
                 self._item_last_bytes = downloaded
 
             effective_speed = raw_speed if (raw_speed and raw_speed > 0) else self._item_smooth_speed
+            if effective_speed > 0:
+                self._last_effective_speed = effective_speed
+            else:
+                effective_speed = self._last_effective_speed
 
-            # Accurate item ETA calculation
+            # Accurate current item ETA calculation
             eta_val = None
             if raw_eta is not None and raw_eta >= 0:
                 eta_val = raw_eta
@@ -267,18 +278,26 @@ class PlaylistDownloadWorker(QThread):
             if total > 0:
                 percent = int((downloaded / total) * 100)
 
-            # Smooth Overall Batch Progress & Batch ETA
-            item_fraction = min(1.0, max(0.0, downloaded / total)) if total > 0 else 0.0
-            overall_progress_val = int(((self._current_idx + item_fraction) / self._total_items) * 100)
-            
-            batch_elapsed = now - self._batch_start_time
-            completed_fraction = (self._current_idx + item_fraction) / self._total_items
+            # Accurate Net Speed-Based Overall Batch ETA for ALL videos
+            if self._completed_items_count > 0:
+                avg_item_bytes = self._completed_items_bytes / self._completed_items_count
+            elif total > 0:
+                avg_item_bytes = total
+            else:
+                avg_item_bytes = 15 * 1024 * 1024
+
+            remaining_curr = max(0, total - downloaded) if total > 0 else 0
+            upcoming_items = max(0, self._total_items - (self._current_idx + 1))
+            total_batch_remaining_bytes = remaining_curr + (upcoming_items * avg_item_bytes)
+
             batch_eta_val = None
-            if completed_fraction > 0.01 and batch_elapsed > 1.5:
-                est_total_batch_time = batch_elapsed / completed_fraction
-                batch_eta_val = max(0.0, est_total_batch_time - batch_elapsed)
+            if effective_speed > 0 and total_batch_remaining_bytes > 0:
+                batch_eta_val = total_batch_remaining_bytes / effective_speed
 
             batch_eta_str = format_eta(batch_eta_val) if batch_eta_val is not None else "--:--"
+
+            item_fraction = min(1.0, max(0.0, downloaded / total)) if total > 0 else 0.0
+            overall_progress_val = int(((self._current_idx + item_fraction) / self._total_items) * 100)
 
             data = {
                 "status": "Downloading",
@@ -296,25 +315,25 @@ class PlaylistDownloadWorker(QThread):
                 self.item_progress.emit(self._current_item_id, data)
 
         elif status == 'finished':
-            now = time.time()
-            batch_elapsed = now - self._batch_start_time
-            completed_fraction = (self._current_idx + 0.95) / self._total_items
-            batch_eta_val = None
-            if completed_fraction > 0.01 and batch_elapsed > 1.5:
-                est_total = batch_elapsed / completed_fraction
-                batch_eta_val = max(0.0, est_total - batch_elapsed)
+            # Raw stream download finished: preserve net speed and byte stats
+            effective_speed = self._last_effective_speed or self._item_smooth_speed
+            avg_item_bytes = (self._completed_items_bytes / self._completed_items_count) if self._completed_items_count > 0 else (self._item_last_bytes or 15 * 1024 * 1024)
+            upcoming_items = max(0, self._total_items - (self._current_idx + 1))
+            total_batch_remaining_bytes = upcoming_items * avg_item_bytes
 
+            batch_eta_val = (total_batch_remaining_bytes / effective_speed) if (effective_speed > 0 and total_batch_remaining_bytes > 0) else None
             batch_eta_str = format_eta(batch_eta_val) if batch_eta_val is not None else "--:--"
 
+            final_bytes = self._item_last_bytes or self._item_total_bytes
             if self._current_item_id:
                 self.item_progress.emit(self._current_item_id, {
-                    "status": "Processing / Converting...",
+                    "status": "Downloading",
                     "percent": 100,
-                    "speed_str": "Converting",
-                    "eta_str": "--:--",
-                    "downloaded_str": "",
-                    "total_str": "",
-                    "batch_percent": int(((self._current_idx + 0.95) / self._total_items) * 100),
+                    "speed_str": format_speed(effective_speed),
+                    "eta_str": "00:00",
+                    "downloaded_str": format_bytes(final_bytes),
+                    "total_str": format_bytes(final_bytes),
+                    "batch_percent": int(((self._current_idx + 1.0) / self._total_items) * 100),
                     "batch_eta_str": batch_eta_str
                 })
 
@@ -440,21 +459,20 @@ class PlaylistDownloadWorker(QThread):
                 pp_args = []
                 if audio_format == 'flac':
                     if audio_quality in ['3200', '3000'] or (audio_quality.isdigit() and int(audio_quality) >= 3000):
-                        # Studio Master 24-bit / 96kHz stream yielding bitrate > 3000 kbps
-                        pp_args = ['-ar', '96000', '-sample_fmt', 's24', '-compression_level', '0']
+                        # Studio Master 24-bit / 96kHz stream yielding bitrate > 3000 kbps (sample_fmt s32 in ffmpeg)
+                        pp_args = ['-ar', '96000', '-sample_fmt', 's32', '-compression_level', '0']
                     elif audio_quality == '1411':
                         # 16-bit 44.1kHz standard CD quality
                         pp_args = ['-ar', '44100', '-sample_fmt', 's16']
                 elif audio_format == 'wav':
                     if audio_quality in ['3200', '3000'] or (audio_quality.isdigit() and int(audio_quality) >= 3000):
-                        pp_args = ['-ar', '96000', '-sample_fmt', 's32']
+                        pp_args = ['-ar', '96000', '-c:a', 'pcm_s32le']
                     elif audio_quality in ['2304', '1411']:
-                        pp_args = ['-ar', '48000', '-sample_fmt', 's24']
+                        pp_args = ['-ar', '48000', '-c:a', 'pcm_s24le']
 
                 if pp_args:
                     ydl_opts['postprocessor_args'] = {
-                        'ExtractAudio': pp_args,
-                        'default': pp_args
+                        'ExtractAudio': pp_args
                     }
 
                 if embed_thumb and audio_format in ['mp3', 'm4a', 'flac']:
@@ -472,6 +490,8 @@ class PlaylistDownloadWorker(QThread):
                     final_filename = ydl.prepare_filename(info_dict)
 
                 successful += 1
+                self._completed_items_bytes += (self._item_last_bytes or self._item_total_bytes or 15 * 1024 * 1024)
+                self._completed_items_count += 1
                 self.item_completed.emit(item["id"], final_filename)
                 self.log_message.emit(f"Completed: {title}")
 
@@ -484,17 +504,16 @@ class PlaylistDownloadWorker(QThread):
                 self.item_failed.emit(item["id"], err_msg)
                 self.log_message.emit(f"Failed [{title}]: {err_msg}")
 
-            # Update overall progress upon item completion
-            now = time.time()
-            batch_elapsed = now - self._batch_start_time
-            completed_fraction = (idx + 1) / total_items
-            batch_eta_val = None
-            if completed_fraction < 1.0 and batch_elapsed > 1.5:
-                est_total = batch_elapsed / completed_fraction
-                batch_eta_val = max(0.0, est_total - batch_elapsed)
+            # Net Speed-Based Overall Batch ETA for ALL remaining videos
+            effective_speed = self._last_effective_speed or self._item_smooth_speed
+            avg_item_bytes = (self._completed_items_bytes / self._completed_items_count) if self._completed_items_count > 0 else (self._item_last_bytes or 15 * 1024 * 1024)
+            upcoming_items = max(0, total_items - (idx + 1))
+            total_batch_remaining_bytes = upcoming_items * avg_item_bytes
+
+            batch_eta_val = (total_batch_remaining_bytes / effective_speed) if (effective_speed > 0 and total_batch_remaining_bytes > 0) else None
             batch_eta_str = format_eta(batch_eta_val) if batch_eta_val is not None else "--:--"
 
-            new_overall = int(completed_fraction * 100)
+            new_overall = int(((idx + 1) / total_items) * 100)
             self.overall_progress.emit(idx + 1, total_items, new_overall, batch_eta_str)
 
         self.all_completed.emit(successful, failed, self._is_cancelled)

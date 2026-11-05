@@ -200,28 +200,22 @@ class VideoCard(QFrame):
         pct = data.get("percent", 0)
         self.progress_bar.setValue(pct)
         
-        status_str = data.get("status", "Downloading")
-        if any(w in status_str.lower() for w in ("converting", "processing", "muxing")):
-            self.status_badge.setText("Processing")
-            self.status_badge.setStyleSheet(self._badge_style("#388bfd", "#58a6ff"))
-            self.metrics_lbl.setText("Converting & Tagging...")
-        else:
-            self.status_badge.setText(f"{pct}%")
-            self.status_badge.setStyleSheet(self._badge_style("#1f6feb", "#58a6ff"))
-            
-            speed = data.get("speed_str", "")
-            eta = data.get("eta_str", "")
-            done = data.get("downloaded_str", "")
-            tot = data.get("total_str", "")
-            
-            parts = []
-            if done and tot:
-                parts.append(f"{done} / {tot}")
-            if speed and speed not in ("-- KB/s", "--"):
-                parts.append(speed)
-            if eta and eta != "--:--":
-                parts.append(f"ETA: {eta}")
-            self.metrics_lbl.setText(" | ".join(parts) if parts else "Downloading...")
+        self.status_badge.setText(f"{pct}%")
+        self.status_badge.setStyleSheet(self._badge_style("#1f6feb", "#58a6ff"))
+        
+        speed = data.get("speed_str", "")
+        eta = data.get("eta_str", "")
+        done = data.get("downloaded_str", "")
+        tot = data.get("total_str", "")
+        
+        parts = []
+        if done and tot:
+            parts.append(f"{done} / {tot}")
+        if speed and speed not in ("-- KB/s", "--"):
+            parts.append(speed)
+        if eta and eta not in ("--:--", "00:00"):
+            parts.append(f"ETA: {eta}")
+        self.metrics_lbl.setText(" | ".join(parts) if parts else "Downloading...")
 
     def set_completed(self, filename: str):
         self._is_completed = True
