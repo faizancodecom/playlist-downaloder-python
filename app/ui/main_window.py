@@ -16,7 +16,7 @@ from app.ffmpeg_manager import get_ffmpeg_status
 from app.downloader import PlaylistFetchWorker, PlaylistDownloadWorker, format_duration
 from app.ui.video_card import VideoCard
 from app.ui.thumbnail_loader import ThumbnailLoader
-from app.ui.dialogs import FFmpegDialog, SettingsDialog
+from app.ui.dialogs import FFmpegDialog, SettingsDialog, DownloadCompletedDialog
 from app.ui.styles import DARK_STYLESHEET
 
 VIDEO_FORMATS = ["mp4", "mkv", "webm", "avi", "mov"]
@@ -69,6 +69,9 @@ class MainWindow(QMainWindow):
         self.current_playlist_info = None
         self.fetch_worker = None
         self.download_worker = None
+        self.is_downloading = False
+        self._current_download_idx = 0
+        self._total_download_items = 0
         self.thumbnail_loader = ThumbnailLoader(self)
         self.thumbnail_loader.thumbnail_loaded.connect(self._on_thumbnail_loaded)
 
@@ -77,7 +80,7 @@ class MainWindow(QMainWindow):
 
         # Keyboard shortcuts
         QShortcut(QKeySequence("Ctrl+V"), self, self.paste_clipboard)
-        QShortcut(QKeySequence("Return"), self, self.start_fetch)
+        self.url_input.returnPressed.connect(self.start_fetch)
 
     def _init_ui(self):
         central = QWidget()
@@ -587,10 +590,14 @@ class MainWindow(QMainWindow):
     # ---------------- Fetching Logic ----------------
 
     def start_fetch(self):
-        url = self.url_input.text().strip()
+        url = self.url_input.text().strip().strip('"').strip("'")
         if not url:
-            QMessageBox.information(self, "Missing URL", "Please enter or paste a playlist or video URL.")
+            self.playlist_info_lbl.setText("⚠️ Please paste a valid YouTube Playlist or Video URL above.")
+            self.playlist_info_lbl.setStyleSheet("color: #f85149; font-weight: 600; font-size: 13px;")
+            self.url_input.setFocus()
             return
+
+        self.playlist_info_lbl.setStyleSheet("color: #f0f6fc; font-weight: 600; font-size: 13px;")
 
         # Clear existing cards
         self._clear_cards()
@@ -620,6 +627,7 @@ class MainWindow(QMainWindow):
         self.cards.append(card)
         # Insert before the stretch
         self.cards_layout.insertWidget(self.cards_layout.count() - 1, card)
+        card.show()
         
         # Load thumbnail asynchronously
         thumb_url = item_data.get("thumbnail_url")
@@ -638,6 +646,7 @@ class MainWindow(QMainWindow):
         self.current_playlist_info = playlist_info
         self.fetch_btn.setEnabled(True)
         self.fetch_btn.setText("Fetch Playlist")
+        self.is_downloading = False
 
         title = playlist_info.get("title", "Playlist")
         total = len(items)
@@ -661,24 +670,25 @@ class MainWindow(QMainWindow):
 
     def set_all_selected(self, select: bool):
         for card in self.cards:
-            if card.isVisible():
+            if card.is_item_visible():
                 card.set_selected(select)
         self.update_selection_counter()
 
     def invert_selection(self):
         for card in self.cards:
-            if card.isVisible():
+            if card.is_item_visible():
                 card.set_selected(not card.is_selected())
         self.update_selection_counter()
 
     def filter_items(self, query: str):
+        query = query.strip()
         for card in self.cards:
-            visible = card.matches_filter(query)
-            card.setVisible(visible)
+            matches = card.matches_filter(query)
+            card.set_filtered(not matches)
         self.update_selection_counter()
 
     def update_selection_counter(self):
-        visible_cards = [c for c in self.cards if c.isVisible()]
+        visible_cards = [c for c in self.cards if c.is_item_visible()]
         selected_cards = [c for c in visible_cards if c.is_selected()]
         
         tot_vis = len(visible_cards)
@@ -692,7 +702,8 @@ class MainWindow(QMainWindow):
         else:
             self.selection_count_lbl.setText(f"{tot_sel} of {tot_vis} selected")
 
-        self.download_btn.setEnabled(tot_sel > 0 and (self.download_worker is None or not self.download_worker.isRunning()))
+        can_download = (tot_sel > 0 and not self.is_downloading)
+        self.download_btn.setEnabled(can_download)
         self.download_btn.setText(f"Download Selected ({tot_sel})" if tot_sel > 0 else "Download Selected")
 
     # ---------------- Download Execution ----------------
@@ -700,8 +711,11 @@ class MainWindow(QMainWindow):
     def start_download(self):
         selected_cards = [c for c in self.cards if c.is_selected()]
         if not selected_cards:
-            QMessageBox.information(self, "No Videos Selected", "Please select at least one video to download.")
+            self.overall_status_lbl.setText("⚠️ Please select at least one video to download.")
+            self.overall_status_lbl.setStyleSheet("color: #f85149; font-weight: 500; font-size: 12px; border: none;")
             return
+
+        self.overall_status_lbl.setStyleSheet("color: #8b949e; font-weight: 500; font-size: 12px; border: none;")
 
         items_to_download = [c.item for c in selected_cards]
         out_dir = self.dir_input.text().strip()
@@ -735,6 +749,9 @@ class MainWindow(QMainWindow):
         }
 
         # UI state during download
+        self.is_downloading = True
+        self._current_download_idx = 1
+        self._total_download_items = len(items_to_download)
         self.download_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.pause_btn.setEnabled(True)
@@ -770,16 +787,20 @@ class MainWindow(QMainWindow):
             reply = QMessageBox.question(
                 self, "Cancel Download",
                 "Are you sure you want to cancel the current download process?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
             )
             if reply == QMessageBox.StandardButton.Yes:
                 self.download_worker.cancel()
                 self.cancel_btn.setEnabled(False)
                 self.overall_status_lbl.setText("Cancelling downloads...")
 
-    def _on_overall_progress(self, idx: int, total: int, percent: int):
+    def _on_overall_progress(self, idx: int, total: int, percent: int, batch_eta_str: str = "--:--"):
+        self._current_download_idx = idx
+        self._total_download_items = total
         self.overall_progress_bar.setValue(percent)
-        self.overall_status_lbl.setText(f"Processing item {idx} of {total} ({percent}%)")
+        eta_part = f" • Est. remaining: {batch_eta_str}" if (batch_eta_str and batch_eta_str != "--:--") else ""
+        self.overall_status_lbl.setText(f"Processing item {idx} of {total} ({percent}%){eta_part}")
 
     def _on_item_download_started(self, item_id: str, idx: int, title: str):
         for card in self.cards:
@@ -793,10 +814,31 @@ class MainWindow(QMainWindow):
                 card.set_progress(data)
                 break
         
+        status_text = data.get("status", "")
         speed = data.get("speed_str", "")
         eta = data.get("eta_str", "")
-        if speed or eta:
-            self.overall_speed_lbl.setText(f"{speed} | ETA: {eta}")
+        batch_pct = data.get("batch_percent", self.overall_progress_bar.value())
+        batch_eta = data.get("batch_eta_str", "")
+
+        self.overall_progress_bar.setValue(batch_pct)
+
+        if any(w in status_text.lower() for w in ("converting", "processing", "muxing")):
+            self.overall_speed_lbl.setText("Converting & Tagging...")
+        else:
+            speed_info = []
+            if speed and speed not in ("-- KB/s", "--"):
+                speed_info.append(speed)
+            if eta and eta != "--:--":
+                speed_info.append(f"Item ETA: {eta}")
+            if speed_info:
+                self.overall_speed_lbl.setText(" | ".join(speed_info))
+
+        if batch_eta and batch_eta != "--:--":
+            idx = self._current_download_idx or 1
+            tot = self._total_download_items or len(self.cards)
+            self.overall_status_lbl.setText(
+                f"Processing item {idx} of {tot} ({batch_pct}%) • Est. remaining: {batch_eta}"
+            )
 
     def _on_item_download_completed(self, item_id: str, filename: str):
         for card in self.cards:
@@ -810,22 +852,27 @@ class MainWindow(QMainWindow):
                 card.set_failed(error_msg)
                 break
 
-    def _on_all_downloads_completed(self, successful: int, failed: int):
-        self.download_btn.setEnabled(True)
+    def _on_all_downloads_completed(self, successful: int, failed: int, was_cancelled: bool = False):
+        self.is_downloading = False
         self.cancel_btn.setEnabled(False)
         self.pause_btn.setEnabled(False)
+        self.pause_btn.setText("Pause")
         self.fetch_btn.setEnabled(True)
         self.overall_speed_lbl.setText("")
-        self.overall_progress_bar.setValue(100)
 
+        if was_cancelled:
+            self.overall_status_lbl.setText(f"Cancelled: {successful} downloaded before cancellation.")
+            self.update_selection_counter()
+            return
+
+        self.overall_progress_bar.setValue(100)
         status_msg = f"Completed: {successful} succeeded"
         if failed > 0:
             status_msg += f", {failed} failed"
         self.overall_status_lbl.setText(status_msg)
 
-        QMessageBox.information(
-            self,
-            "Download Finished",
-            f"Batch download completed!\n\nSuccessfully downloaded: {successful}\nFailed: {failed}\n\nFiles saved in:\n{self.dir_input.text()}"
-        )
+        # Show dark-themed custom completion dialog
+        dlg = DownloadCompletedDialog(successful, failed, self.dir_input.text(), self)
+        dlg.exec()
+
         self.update_selection_counter()

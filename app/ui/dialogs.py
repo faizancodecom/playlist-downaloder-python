@@ -3,9 +3,11 @@ import subprocess
 from pathlib import Path
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar,
-    QPlainTextEdit, QFileDialog, QCheckBox, QSpinBox, QGroupBox, QMessageBox
+    QPlainTextEdit, QFileDialog, QCheckBox, QSpinBox, QGroupBox, QMessageBox,
+    QLineEdit, QFrame
 )
 from PyQt6.QtCore import Qt
+import sys
 
 from app.ffmpeg_manager import get_ffmpeg_status, FFmpegDownloaderThread, BIN_DIR
 from app.config import config
@@ -139,11 +141,121 @@ class FFmpegDialog(QDialog):
             QMessageBox.information(self, "FFmpeg Installed", "FFmpeg binaries installed successfully!")
 
 
+class DownloadCompletedDialog(QDialog):
+    """
+    Polished Dark-Themed Completion Dialog
+    Replaces ugly/unreadable standard QMessageBox popups.
+    """
+    def __init__(self, successful: int, failed: int, output_dir: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Download Finished")
+        self.setFixedSize(480, 260)
+        self.output_dir = output_dir
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(14)
+        layout.setContentsMargins(22, 20, 22, 20)
+
+        # Header with icon and title
+        header = QHBoxLayout()
+        header.setSpacing(12)
+
+        icon_lbl = QLabel("✓" if failed == 0 else "ℹ")
+        icon_lbl.setFixedSize(38, 38)
+        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        bg_col = "#1b4b27" if failed == 0 else "#2d333b"
+        border_col = "#238636" if failed == 0 else "#58a6ff"
+        text_col = "#3fb950" if failed == 0 else "#58a6ff"
+        icon_lbl.setStyleSheet(f"""
+            QLabel {{
+                background-color: {bg_col};
+                color: {text_col};
+                border: 2px solid {border_col};
+                border-radius: 19px;
+                font-size: 20px;
+                font-weight: bold;
+            }}
+        """)
+        header.addWidget(icon_lbl)
+
+        title_box = QVBoxLayout()
+        title_box.setSpacing(2)
+        main_title = QLabel("Batch Download Completed" if failed == 0 else "Download Finished with Notices")
+        main_title.setStyleSheet("font-size: 16px; font-weight: 700; color: #f0f6fc;")
+        title_box.addWidget(main_title)
+
+        sub_title = QLabel(f"Processed batch to destination folder")
+        sub_title.setStyleSheet("color: #8b949e; font-size: 12px;")
+        title_box.addWidget(sub_title)
+
+        header.addLayout(title_box)
+        header.addStretch()
+        layout.addLayout(header)
+
+        # Stats Card
+        stats_frame = QFrame()
+        stats_frame.setStyleSheet("""
+            QFrame {
+                background-color: #161b22;
+                border: 1px solid #30363d;
+                border-radius: 8px;
+                padding: 10px;
+            }
+        """)
+        stats_layout = QVBoxLayout(stats_frame)
+        stats_layout.setContentsMargins(12, 10, 12, 10)
+        stats_layout.setSpacing(6)
+
+        stat_row = QHBoxLayout()
+        succ_lbl = QLabel(f"Successfully downloaded: {successful} files")
+        succ_lbl.setStyleSheet("color: #3fb950; font-weight: 600; font-size: 13px;")
+        stat_row.addWidget(succ_lbl)
+
+        if failed > 0:
+            fail_lbl = QLabel(f"• Failed: {failed}")
+            fail_lbl.setStyleSheet("color: #f85149; font-weight: 600; font-size: 13px;")
+            stat_row.addWidget(fail_lbl)
+        stat_row.addStretch()
+        stats_layout.addLayout(stat_row)
+
+        dir_lbl = QLabel(f"Destination: {self.output_dir}")
+        dir_lbl.setStyleSheet("color: #8b949e; font-size: 11px; font-family: Consolas, monospace;")
+        dir_lbl.setWordWrap(True)
+        stats_layout.addWidget(dir_lbl)
+
+        layout.addWidget(stats_frame)
+
+        # Bottom Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        self.close_btn = QPushButton("Done")
+        self.close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(self.close_btn)
+
+        self.open_folder_btn = QPushButton("Open Folder")
+        self.open_folder_btn.setObjectName("primaryButton")
+        self.open_folder_btn.clicked.connect(self.open_folder)
+        btn_layout.addWidget(self.open_folder_btn)
+
+        layout.addLayout(btn_layout)
+
+    def open_folder(self):
+        if os.path.exists(self.output_dir):
+            if sys.platform == "win32":
+                os.startfile(self.output_dir)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", self.output_dir])
+            else:
+                subprocess.Popen(["xdg-open", self.output_dir])
+        self.accept()
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Preferences & Defaults")
-        self.setFixedSize(480, 360)
+        self.setFixedSize(520, 420)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(14)
@@ -173,6 +285,22 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(group)
 
+        # Custom FFmpeg Path Group
+        ffmpeg_grp = QGroupBox("Custom FFmpeg Executable (Optional)")
+        f_layout = QHBoxLayout(ffmpeg_grp)
+        f_layout.setSpacing(8)
+
+        self.ffmpeg_input = QLineEdit()
+        self.ffmpeg_input.setPlaceholderText("Leave blank to use auto-detected / local FFmpeg")
+        self.ffmpeg_input.setText(config.get("custom_ffmpeg_path", ""))
+        f_layout.addWidget(self.ffmpeg_input)
+
+        browse_ff_btn = QPushButton("Browse...")
+        browse_ff_btn.clicked.connect(self.browse_ffmpeg)
+        f_layout.addWidget(browse_ff_btn)
+
+        layout.addWidget(ffmpeg_grp)
+
         # Bottom buttons
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
@@ -188,8 +316,15 @@ class SettingsDialog(QDialog):
 
         layout.addLayout(btn_layout)
 
+    def browse_ffmpeg(self):
+        filter_str = "Executable (*.exe);;All Files (*)" if sys.platform == "win32" else "All Files (*)"
+        chosen, _ = QFileDialog.getOpenFileName(self, "Select FFmpeg Binary", "", filter_str)
+        if chosen:
+            self.ffmpeg_input.setText(chosen)
+
     def save_settings(self):
         config.set("embed_thumbnail", self.chk_thumb.isChecked())
         config.set("embed_metadata", self.chk_meta.isChecked())
         config.set("embed_subtitles", self.chk_sub.isChecked())
+        config.set("custom_ffmpeg_path", self.ffmpeg_input.text().strip())
         self.accept()

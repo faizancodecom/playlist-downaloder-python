@@ -34,12 +34,23 @@ def format_speed(bytes_per_sec):
     return f"{format_bytes(bytes_per_sec)}/s"
 
 def format_eta(seconds):
-    if not seconds or not isinstance(seconds, (int, float)):
+    if seconds is None:
         return "--:--"
-    seconds = int(seconds)
-    mins = seconds // 60
-    secs = seconds % 60
-    return f"{mins:02d}:{secs:02d}"
+    try:
+        seconds = float(seconds)
+        if seconds < 0 or seconds != seconds:  # negative or NaN check
+            return "--:--"
+        seconds = int(round(seconds))
+        if seconds == 0:
+            return "00:00"
+        hours = seconds // 3600
+        mins = (seconds % 3600) // 60
+        secs = seconds % 60
+        if hours > 0:
+            return f"{hours:02d}:{mins:02d}:{secs:02d}"
+        return f"{mins:02d}:{secs:02d}"
+    except Exception:
+        return "--:--"
 
 
 class PlaylistFetchWorker(QThread):
@@ -167,12 +178,12 @@ class PlaylistFetchWorker(QThread):
 
 
 class PlaylistDownloadWorker(QThread):
-    overall_progress = pyqtSignal(int, int, int)       # index, total, overall_percent
-    item_started = pyqtSignal(str, int, str)           # item_id, index, title
-    item_progress = pyqtSignal(str, dict)              # item_id, progress_dict
-    item_completed = pyqtSignal(str, str)              # item_id, filename
-    item_failed = pyqtSignal(str, str)                 # item_id, error_msg
-    all_completed = pyqtSignal(int, int)               # successful, failed
+    overall_progress = pyqtSignal(int, int, int, str)       # index, total, overall_percent, batch_eta_str
+    item_started = pyqtSignal(str, int, str)                 # item_id, index, title
+    item_progress = pyqtSignal(str, dict)                    # item_id, progress_dict
+    item_completed = pyqtSignal(str, str)                    # item_id, filename
+    item_failed = pyqtSignal(str, str)                       # item_id, error_msg
+    all_completed = pyqtSignal(int, int, bool)               # successful, failed, was_cancelled
     log_message = pyqtSignal(str)
 
     def __init__(self, items, download_options, parent=None):
@@ -182,6 +193,15 @@ class PlaylistDownloadWorker(QThread):
         self._is_cancelled = False
         self._is_paused = False
         self._current_item_id = None
+        self._current_idx = 0
+        self._total_items = len(items)
+
+        # Performance & ETA tracking metrics
+        self._batch_start_time = 0.0
+        self._item_start_time = 0.0
+        self._item_last_time = 0.0
+        self._item_last_bytes = 0
+        self._item_smooth_speed = 0.0
 
     def cancel(self):
         self._is_cancelled = True
@@ -202,40 +222,100 @@ class PlaylistDownloadWorker(QThread):
         while self._is_paused and not self._is_cancelled:
             time.sleep(0.2)
 
+        if self._is_cancelled:
+            raise Exception("Download cancelled by user.")
+
         status = d.get('status')
         if status == 'downloading':
             total = d.get('total_bytes') or d.get('total_bytes_estimate') or 0
             downloaded = d.get('downloaded_bytes') or 0
-            speed = d.get('speed') or 0
-            eta = d.get('eta') or 0
+            raw_speed = d.get('speed')
+            raw_eta = d.get('eta')
+            now = time.time()
+
+            # Dynamic speed smoothing
+            dt = now - self._item_last_time
+            if dt >= 0.2:
+                db = downloaded - self._item_last_bytes
+                if db > 0 and dt > 0:
+                    inst_speed = db / dt
+                    if self._item_smooth_speed <= 0:
+                        self._item_smooth_speed = inst_speed
+                    else:
+                        self._item_smooth_speed = (0.65 * self._item_smooth_speed) + (0.35 * inst_speed)
+                self._item_last_time = now
+                self._item_last_bytes = downloaded
+
+            effective_speed = raw_speed if (raw_speed and raw_speed > 0) else self._item_smooth_speed
+
+            # Accurate item ETA calculation
+            eta_val = None
+            if raw_eta is not None and raw_eta >= 0:
+                eta_val = raw_eta
+            elif effective_speed and effective_speed > 0 and total > downloaded:
+                eta_val = (total - downloaded) / effective_speed
+            elif d.get('fragment_count') and d.get('fragment_index'):
+                fc = d['fragment_count']
+                fi = d['fragment_index']
+                item_elapsed = now - self._item_start_time
+                if fi > 0 and item_elapsed > 0:
+                    frag_rate = fi / item_elapsed
+                    if frag_rate > 0 and fc > fi:
+                        eta_val = (fc - fi) / frag_rate
 
             percent = 0
             if total > 0:
                 percent = int((downloaded / total) * 100)
+
+            # Smooth Overall Batch Progress & Batch ETA
+            item_fraction = min(1.0, max(0.0, downloaded / total)) if total > 0 else 0.0
+            overall_progress_val = int(((self._current_idx + item_fraction) / self._total_items) * 100)
+            
+            batch_elapsed = now - self._batch_start_time
+            completed_fraction = (self._current_idx + item_fraction) / self._total_items
+            batch_eta_val = None
+            if completed_fraction > 0.01 and batch_elapsed > 1.5:
+                est_total_batch_time = batch_elapsed / completed_fraction
+                batch_eta_val = max(0.0, est_total_batch_time - batch_elapsed)
+
+            batch_eta_str = format_eta(batch_eta_val) if batch_eta_val is not None else "--:--"
 
             data = {
                 "status": "Downloading",
                 "percent": min(100, max(0, percent)),
                 "downloaded_bytes": downloaded,
                 "total_bytes": total,
-                "speed_str": format_speed(speed),
-                "eta_str": format_eta(eta),
+                "speed_str": format_speed(effective_speed),
+                "eta_str": format_eta(eta_val),
                 "downloaded_str": format_bytes(downloaded),
-                "total_str": format_bytes(total)
+                "total_str": format_bytes(total),
+                "batch_percent": min(100, max(0, overall_progress_val)),
+                "batch_eta_str": batch_eta_str
             }
             if self._current_item_id:
                 self.item_progress.emit(self._current_item_id, data)
 
         elif status == 'finished':
-            filename = d.get('filename', '')
+            now = time.time()
+            batch_elapsed = now - self._batch_start_time
+            completed_fraction = (self._current_idx + 0.95) / self._total_items
+            batch_eta_val = None
+            if completed_fraction > 0.01 and batch_elapsed > 1.5:
+                est_total = batch_elapsed / completed_fraction
+                batch_eta_val = max(0.0, est_total - batch_elapsed)
+
+            batch_eta_str = format_eta(batch_eta_val) if batch_eta_val is not None else "--:--"
+
             if self._current_item_id:
                 self.item_progress.emit(self._current_item_id, {
                     "status": "Processing / Converting...",
                     "percent": 100,
-                    "speed_str": "--",
-                    "eta_str": "00:00",
+                    "speed_str": "Converting",
+                    "eta_str": "--:--",
                     "downloaded_str": "",
-                    "total_str": ""
+                    "total_str": "",
+                    "batch_percent": int(((self._current_idx + 0.95) / self._total_items) * 100),
+                    "batch_eta_str": batch_eta_str
                 })
 
     def run(self):
@@ -263,6 +343,8 @@ class PlaylistDownloadWorker(QThread):
             self.log_message.emit("Warning: FFmpeg binary not found. Formats requiring muxing may fail.")
 
         total_items = len(self.items)
+        self._total_items = total_items
+        self._batch_start_time = time.time()
         successful = 0
         failed = 0
 
@@ -271,18 +353,38 @@ class PlaylistDownloadWorker(QThread):
                 self.log_message.emit("Download queue cancelled by user.")
                 break
 
+            while self._is_paused and not self._is_cancelled:
+                time.sleep(0.2)
+
+            if self._is_cancelled:
+                self.log_message.emit("Download queue cancelled by user.")
+                break
+
+            self._current_idx = idx
             self._current_item_id = item["id"]
+            self._item_start_time = time.time()
+            self._item_last_time = self._item_start_time
+            self._item_last_bytes = 0
+            self._item_smooth_speed = 0.0
+
             title = item.get("title", f"Item {idx+1}")
             self.item_started.emit(item["id"], idx + 1, title)
             self.log_message.emit(f"[{idx+1}/{total_items}] Starting: {title}")
 
-            # Calculate overall progress percentage
+            # Initial progress for this item
             overall_pct = int((idx / total_items) * 100)
-            self.overall_progress.emit(idx + 1, total_items, overall_pct)
+            batch_elapsed = time.time() - self._batch_start_time
+            batch_eta_str = "--:--"
+            if idx > 0 and batch_elapsed > 1.5:
+                est_total = batch_elapsed / (idx / total_items)
+                batch_eta_str = format_eta(max(0.0, est_total - batch_elapsed))
 
-            # Build filename template
+            self.overall_progress.emit(idx + 1, total_items, overall_pct, batch_eta_str)
+
+            # Build filename template (avoid NA with single-item yt-dlp extractions)
+            item_num = item.get("index", idx + 1)
             if numbering and total_items > 1:
-                filename_template = os.path.join(output_dir, f"%(playlist_index)02d - %(title)s.%(ext)s")
+                filename_template = os.path.join(output_dir, f"{item_num:02d} - %(title)s.%(ext)s")
             else:
                 filename_template = os.path.join(output_dir, "%(title)s.%(ext)s")
 
@@ -351,7 +453,8 @@ class PlaylistDownloadWorker(QThread):
 
                 if pp_args:
                     ydl_opts['postprocessor_args'] = {
-                        'FFmpegExtractAudio': pp_args
+                        'ExtractAudio': pp_args,
+                        'default': pp_args
                     }
 
                 if embed_thumb and audio_format in ['mp3', 'm4a', 'flac']:
@@ -381,9 +484,18 @@ class PlaylistDownloadWorker(QThread):
                 self.item_failed.emit(item["id"], err_msg)
                 self.log_message.emit(f"Failed [{title}]: {err_msg}")
 
-            # Update overall progress
-            new_overall = int(((idx + 1) / total_items) * 100)
-            self.overall_progress.emit(idx + 1, total_items, new_overall)
+            # Update overall progress upon item completion
+            now = time.time()
+            batch_elapsed = now - self._batch_start_time
+            completed_fraction = (idx + 1) / total_items
+            batch_eta_val = None
+            if completed_fraction < 1.0 and batch_elapsed > 1.5:
+                est_total = batch_elapsed / completed_fraction
+                batch_eta_val = max(0.0, est_total - batch_elapsed)
+            batch_eta_str = format_eta(batch_eta_val) if batch_eta_val is not None else "--:--"
 
-        self.all_completed.emit(successful, failed)
+            new_overall = int(completed_fraction * 100)
+            self.overall_progress.emit(idx + 1, total_items, new_overall, batch_eta_str)
+
+        self.all_completed.emit(successful, failed, self._is_cancelled)
         self.log_message.emit(f"Batch completed: {successful} succeeded, {failed} failed.")

@@ -7,6 +7,8 @@ import urllib.request
 from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from app.config import config
+
 FFMPEG_WIN64_URL = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BIN_DIR = PROJECT_ROOT / "bin"
@@ -22,23 +24,35 @@ def find_binary(binary_name="ffmpeg"):
     """
     Finds executable path for ffmpeg or ffprobe.
     Checks:
-    1. Local bin/ directory in project
-    2. System PATH
-    3. Common Windows directories
+    1. Custom path configured in settings
+    2. Local bin/ directory in project
+    3. System PATH
+    4. Common Windows directories
     """
     exe_name = f"{binary_name}.exe" if sys.platform == "win32" else binary_name
     
-    # 1. Check local bin
+    # 1. Check custom path from settings
+    custom = config.get("custom_ffmpeg_path", "").strip()
+    if custom:
+        c_path = Path(custom)
+        if c_path.is_file() and c_path.name.lower() == exe_name.lower() and c_path.exists():
+            return str(c_path)
+        elif c_path.is_dir():
+            cand = c_path / exe_name
+            if cand.exists():
+                return str(cand)
+
+    # 2. Check local bin
     local_path = BIN_DIR / exe_name
     if local_path.exists():
         return str(local_path)
     
-    # 2. Check system PATH
+    # 3. Check system PATH
     path_which = shutil.which(binary_name)
     if path_which:
         return path_which
 
-    # 3. Check common Windows paths
+    # 4. Check common Windows paths
     candidates = [
         Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links" / exe_name,
         Path("C:/ffmpeg/bin") / exe_name,

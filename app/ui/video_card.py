@@ -13,10 +13,12 @@ class VideoCard(QFrame):
         self.item_id = item_data["id"]
         self._is_completed = False
         self._is_failed = False
+        self._is_filtered = False
         
         self.setObjectName("videoCard")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(84)
+        self.show()
         
         self.setStyleSheet("""
             QFrame#videoCard {
@@ -199,10 +201,10 @@ class VideoCard(QFrame):
         self.progress_bar.setValue(pct)
         
         status_str = data.get("status", "Downloading")
-        if "converting" in status_str.lower() or "processing" in status_str.lower():
+        if any(w in status_str.lower() for w in ("converting", "processing", "muxing")):
             self.status_badge.setText("Processing")
             self.status_badge.setStyleSheet(self._badge_style("#388bfd", "#58a6ff"))
-            self.metrics_lbl.setText("Muxing audio/video...")
+            self.metrics_lbl.setText("Converting & Tagging...")
         else:
             self.status_badge.setText(f"{pct}%")
             self.status_badge.setStyleSheet(self._badge_style("#1f6feb", "#58a6ff"))
@@ -214,12 +216,12 @@ class VideoCard(QFrame):
             
             parts = []
             if done and tot:
-                parts.append(f"{done}/{tot}")
-            if speed and speed != "-- KB/s":
+                parts.append(f"{done} / {tot}")
+            if speed and speed not in ("-- KB/s", "--"):
                 parts.append(speed)
             if eta and eta != "--:--":
                 parts.append(f"ETA: {eta}")
-            self.metrics_lbl.setText(" | ".join(parts))
+            self.metrics_lbl.setText(" | ".join(parts) if parts else "Downloading...")
 
     def set_completed(self, filename: str):
         self._is_completed = True
@@ -236,10 +238,17 @@ class VideoCard(QFrame):
         self.metrics_lbl.setText("Error occurred")
         self.setToolTip(error_msg)
 
+    def set_filtered(self, filtered: bool):
+        self._is_filtered = filtered
+        self.setVisible(not filtered)
+
+    def is_item_visible(self) -> bool:
+        return not self._is_filtered
+
     def matches_filter(self, query: str) -> bool:
         if not query:
             return True
-        q = query.lower()
+        q = query.strip().lower()
         title = self.item.get("title", "").lower()
         uploader = self.item.get("uploader", "").lower()
         return q in title or q in uploader
